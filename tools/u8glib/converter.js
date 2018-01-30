@@ -42,18 +42,22 @@ bitmap_converter = function() {
     };
   })($.event.fix);
 
-  var paste_message = 'Paste an image or C/C++ bitmap here.',
+  var paste_message = 'Paste image or C/C++ here.',
       preview_scale = 4,
-      lcd_on    = [   0,  30, 253, 255 ],
-      lcd_off   = [ 116, 241, 255, 255 ],
-      $large = $('#preview-lg');
+      pix_on  = [   0,   0,   0, 255 ],
+      pix_off = [ 255, 255, 255,   0 ],
+      lcd_off = [   0,  30, 253, 255 ],
+      lcd_on  = [ 116, 241, 255, 255 ];
 
-  if (typeof $large[0].getContext == 'undefined') return;
+  if (typeof $('canvas')[0].getContext == 'undefined') return;
 
-  var $small      = $('#preview-sm'),
-      $img        = $('<img/>'),
-      ctx         = $large[0].getContext('2d'),
-      ctx_sm      = $small[0].getContext('2d'),
+  var $img        = $('<img/>'),
+      $large      = $('#preview-lg'),
+      $small      = $('#preview-sm'),
+      cnv         = $large[0],
+      cnv_sm      = $small[0],
+      ctx         = cnv.getContext('2d'),
+      ctx_sm      = cnv_sm.getContext('2d'),
       $filein     = $('#file-input'),
       $err        = $('#err-box'),
       $outdiv     = $('#cpp-container'),
@@ -68,9 +72,8 @@ bitmap_converter = function() {
       $fan        = $('#fan-on'),
       $type       = $('input[name=bitmap-type]'),
       $statop     = $('#stat-sub'),
-      $oldon      = $('#old-on'),
       $pasted     = $('#pasted'),
-      field_arr   = [$binary[0], $ascii[0], $skinny[0], $hotends[0], $rj[0], $bed[0], $fan[0], $type[0]],
+      $field_arr  = $('#bin-on, #ascii-on, #skinny-on, #hotends, #rj-on, #bed-on, #fan-on, input[name=bitmap-type]'),
       tohex       = function(b) { return '0x' + ('0' + (b & 0xFF).toString(16)).toUpperCase().slice(-2); },
       tobin       = function(b) { return 'B' + ('0000000' + (b & 0xFF).toString(2)).slice(-8); },
       random_name = function(prefix) { return (prefix||'') + Math.random().toString(36).substring(7); },
@@ -97,10 +100,39 @@ bitmap_converter = function() {
   };
 
   /**
-   * - Draw $img into the small and large canvases.
-   * Convert the small canvas image data into C++ text
+   * Draw the given image into the canvases.
    */
-  var generate_cpp = function(e) {
+  var render_image_into_canvases = function($i, notsmall, notlarge) {
+    var i = $i[0], iw = i.width, ih = i.height;
+
+    // Draw the image into one or both canvases
+    if (!notsmall) {
+      // Prepare the small hidden canvas to receive the image
+      ctx_sm.canvas.width  = iw;
+      ctx_sm.canvas.height = ih;
+      ctx_sm.drawImage(i, 0, 0, ctx_sm.canvas.width, ctx_sm.canvas.height);
+    }
+
+    // Scaled view so you can actually see the pixels
+    if (!notlarge) {
+      ctx.canvas.width  = iw * preview_scale;
+      ctx.canvas.height = ih * preview_scale;
+      //ctx.mozImageSmoothingEnabled = false;
+      ctx.imageSmoothingQuality = 'medium';
+      ctx.webkitImageSmoothingEnabled = false;
+      ctx.msImageSmoothingEnabled = false;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(i, 0, 0, ctx.canvas.width, ctx.canvas.height);
+    }
+  };
+
+  /**
+   * Draw $img into the small and large canvases.
+   * Convert the small canvas image data into C text.
+   * Display the image and converted text.
+   * Focus and select the converted text.
+   */
+  var generate_cpp = function(e,no_render) {
 
     // Get the image width and height in pixels.
     var iw = $img[0].width, ih = $img[0].height;
@@ -111,28 +143,12 @@ bitmap_converter = function() {
     if (iw > 128 || ih > 64)
       return error_message("Image too large for display. Maximum 128 x 64.");
 
-    // Prepare the small hidden canvas to receive the image
-    ctx_sm.canvas.width  = iw;
-    ctx_sm.canvas.height = ih;
-
-    // Scaled view so you can actually see the pixels
-    ctx.canvas.width  = iw * preview_scale;
-    ctx.canvas.height = ih * preview_scale;
-
-    //ctx.mozImageSmoothingEnabled = false;
-    ctx.imageSmoothingQuality = 'medium';
-    ctx.webkitImageSmoothingEnabled = false;
-    ctx.msImageSmoothingEnabled = false;
-    ctx.imageSmoothingEnabled = false;
-
-    // Draw the image into both canvases
-    [ctx_sm, ctx].forEach(function(c,i) {
-      c.drawImage($img[0], 0, 0, c.canvas.width, c.canvas.height);
-    });
+    render_image_into_canvases($img, false, no_render);
 
     // Threshold filter the image into the out[] array
     var out = [],
-        buffer = ctx_sm.getImageData(0, 0, iw, ih).data;
+        dataref = ctx_sm.getImageData(0, 0, iw, ih),
+        data = dataref.data;
 
     var bytewidth = Math.ceil(iw / 8),                    // Bytes wide is important
 
@@ -160,9 +176,28 @@ bitmap_converter = function() {
     if (extra_x < 0) extra_x = 0;
     if (extra_y < 0) extra_y = 0;
 
-    for (var i = 0; i < buffer.length; i += 4) {
-      var gray = buffer[i] * 0.3 + buffer[i+1] * 0.59 + buffer[i+2] * 0.11;
-      out.push(is_inv != (gray < 127 && buffer[i+3] > 63));
+    var $tcnv, tctx, tref, tdat = [];
+    if (!no_render) {
+      $tcnv = $('<canvas/>').attr({ 'class':'hideme', 'width':iw, 'height':ih });
+      tctx = $tcnv[0].getContext('2d');
+      tref = tctx.createImageData(iw, ih);
+      tdat = tref.data;
+    }
+
+    // Convert to grayscale, perform threshold, and beautify
+    for (var i = 0; i < data.length; i += 4) {
+      var gray = data[i] * 0.3 + data[i+1] * 0.59 + data[i+2] * 0.11,
+          pixel = is_inv != (gray < 127 && data[i+3] > 63),
+          c = pixel ? lcd_on : lcd_off;
+      out.push(pixel);
+      tdat[i] = c[0]; tdat[i+1] = c[1]; tdat[i+2] = c[2]; tdat[i+3] = c[3];
+    }
+
+    if (!no_render) {
+      tctx.putImageData(tref, 0, 0);
+      var $vimg = $('<img/>').width(iw).height(ih)
+                    .one('load', function(){ render_image_into_canvases($(this), true, false); })
+                    .attr('src', $tcnv[0].toDataURL('image/png'));
     }
 
     //
@@ -175,7 +210,7 @@ bitmap_converter = function() {
               ' * This bitmap from ' + data_source + '\n */\n';
 
     if (is_stat) {
-      if (!is_lpad) {
+      if (!is_lpad && extra_x) {
         // If not left-padded move the graphic all the way to the right
         cpp += '#define STATUS_SCREEN_X ' + (extra_x * 8) + '\n';
         extra_x = 0;
@@ -202,8 +237,7 @@ bitmap_converter = function() {
         var byte = 0;
         for (var b = 0; b < 8; b++) {       // loop 8 bits
           var xx = x + b, i = y * iw + xx,
-              bb = xx < iw && out[i];       // a set bit?
-          if (is_inv && xx >= iw) bb = !bb;
+              bb = xx < iw ? out[i] : is_inv; // a set bit?
           byte = (byte << 1) | bb;          // add to the byte
           bitline += is_thin
                      ? b % 2 ? ['·','▐','▌','█'][byte & 3] : ''
@@ -235,12 +269,13 @@ bitmap_converter = function() {
         cpp += '\nconst unsigned char *status_screen1_bmp = status_screen0_bmp;\n'
     */
 
-    $large.show();
+    $large.css('display','block');
     $outdiv.show();
     $output
       .val(cpp)
       .attr('rows', (cpp.match(/\n/g)||[]).length + 1)
-      .trigger('focus');
+      //.trigger('focus')
+    ;
 
     $('#where').html(
       type == 'boot' ? '<strong><tt>_Bootscreen.h</tt></strong>' :
@@ -258,7 +293,8 @@ bitmap_converter = function() {
 
     // Kill most form actions until an image exists
     $img.off();
-    $(field_arr).off();
+    $field_arr.off();
+    $invert.off();
 
     // ASCII is tied to the Narrow option
     $ascii.change(function(){ $skinny.attr('disabled', !this.checked); return false; });
@@ -278,14 +314,14 @@ bitmap_converter = function() {
     var img = new Image;
     $img = $(img);
 
-    if (w) img.width = w;
-    if (h) img.height = h;
-                                        // Generate C++ whenever...
+    if (w) $img.width(w);
+    if (h) $img.height(h);
 
-    $(field_arr).change(generate_cpp);  //  Form values are changed
-
-    $img.load(generate_cpp)             //  The image loads new content
+    $img.one('load', generate_cpp)      // Generate when the image loads
         .attr('src', data_url);         // Start loading image data
+
+    $field_arr.change(function(e){ generate_cpp(e, true); });
+    $invert.change(generate_cpp);
 
     rnd_name = random_name();           // A new bitmap name on each file load
   };
@@ -331,17 +367,12 @@ bitmap_converter = function() {
 
     if (!wide) return error_message("No bitmap found in pasted text.");
 
-    // Generating an image known to be
-    // light on dark like the LCD.
-    $invert.prop('checked',true);
-
     // Split up lines and iterate
     var bitmap = [], bitstr = '';
     $.each(cpp.split('\n'), function(i,s) {
       s = s.replace(/[ \t]/g,'');
       // Split up bytes and iterate
       var byteline = [], len = 0;
-      //var bitline = '';
       $.each(s.split(','), function(i,s) {
         var b;
         if (s.match(/0x[0-9a-f]+/i))          // Hex
@@ -356,11 +387,7 @@ bitmap_converter = function() {
           return true;                        // Skip this item
 
         for (var i = 0; i < 8; i++) {
-          //bitline += b & 0x80 ? '*' : '.';
-          if (b & 0x80)
-            Array.prototype.push.apply(byteline, lcd_off); // OFF pixel
-          else
-            Array.prototype.push.apply(byteline, lcd_on);  // ON pixel
+          Array.prototype.push.apply(byteline, b & 0x80 ? pix_on : pix_off);
           b <<= 1;
         }
         len += 8;
@@ -383,13 +410,13 @@ bitmap_converter = function() {
     ctx_sm.putImageData(image_data, 0, 0);
 
     data_source = wide + 'x' + high + ' C/C++ data';
-    load_url_into_image($small[0].toDataURL('image/png'), wide, high);
+    load_url_into_image(cnv_sm.toDataURL('image/png'), wide, high);
     $filein.val('');
   };
 
   var got_image = function(fileref) {
     data_source = 'paste';
-    $invert.prop('checked',0);
+    $invert.prop('checked', 0);
     $filein.val('');
     prepare_for_new_image();
     // if (typeof fileref == 'string')
@@ -471,7 +498,7 @@ bitmap_converter = function() {
 
     var fileref = $filein[0].files[0];
     if (fileref) {
-      $invert.prop('checked',0);
+      $invert.prop('checked', 0);
       white_on = false;
       data_source = "the file '" + fileref.name + "'";
       load_file_into_image(fileref);
@@ -487,18 +514,6 @@ bitmap_converter = function() {
 
   // Set a friendly message for C++ data paste
   restore_pasted_cpp_field();
-
-  // Toggle checkbox for the Paste Image/C++ field
-  $oldon.change(function(){
-    if (this.checked) {
-      $pasted.show().trigger('focus');
-      $filein.hide();
-    }
-    else {
-      $pasted.hide();
-      $filein.show();
-    }
-  });
 
   // If the output is clicked, select all
   $output
