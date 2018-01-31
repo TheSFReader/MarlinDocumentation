@@ -161,7 +161,7 @@ var bitmap_converter = function() {
        * When anything changes the C++ is regenerated here.
        * Use no_render to indicate the preview won't change.
        *
-       * - Draw the original $img into the small canvas.
+       * - Draw the original $img into the source canvas.
        * - Draw the converted image into the Preview canvas.
        * - Convert the image data into C text.
        * - Display the image and converted text.
@@ -204,27 +204,30 @@ var bitmap_converter = function() {
 
         /**
          * Convert to grayscale, perform threshold.
-         * Pixels are counted to determine if the image is
-         * appropriate to the 'Light' checkbox setting.
+         *
+         * Dark and light solid pixels are counted to determine
+         * whether the 'Light' checkbox should be hard-set or
+         * should be changeable.
          */
 
-        // Render the last-loaded image into the small canvas and
-        // render the preview if the image isn't going to be modified.
+        // Render the last-loaded image into the Source canvas.
+        // Render Preview only if the image won't be modified.
         render_image_into_canvases($img, false, no_render);
 
-        // A reference to the small canvas image data
+        // A reference to the Source canvas image data
         var data = ctx_sm.getImageData(0, 0, iw, ih).data;
 
-        // Count up light pixels versus dark pixels, ignoring transparent pixels.
+        // Count up solid light and dark pixels.
         var lite = 0, dark = 0;
         for (var i = 0; i < data.length; i += 4) {
           if (data[i+3] > 63) {
-            var gray = grayscale(data), isw = gray > 127;
-            lite +=  isw; dark += !isw;
+            var islit = 127 < grayscale(data.slice(i, i+3));
+            lite += islit; dark += !islit;
           }
         }
 
-        // Disable 'Light' checkbox when it can't be used
+        // Set and disable 'Light' checkbox if
+        // only one setting produces an image.
         var is_lit = $lit[0].checked;
         if (lite) { if (!dark) is_lit = true; }
         else if (dark) is_lit = false;
@@ -234,9 +237,9 @@ var bitmap_converter = function() {
         // Temporary canvas and related vars
         var $tcnv, tctx, tref, tdat = [];
 
+        // Need to re-render the Preview?
         if (!no_render) {
-          // Make a new offscreen Canvas and ImageData
-          // to re-render the Preview Image
+          // Make a new offscreen Canvas for the modified Source image.
           $tcnv = $('<canvas/>').attr({ 'width':iw, 'height':ih });
           tctx = $tcnv[0].getContext('2d');
           tref = tctx.createImageData(iw, ih);
@@ -247,7 +250,7 @@ var bitmap_converter = function() {
         // If rendering also update the ImageData.data.
         var out = [];
         for (var i = 0; i < data.length; i += 4) {
-          var gray = grayscale(data),
+          var gray = grayscale(data.slice(i, i+3)),
               pixon = data[i+3] > 63 && is_lit == (gray > 127),
               pixel = is_inv != pixon,
               c = pixel ? lcd_on : lcd_off;
